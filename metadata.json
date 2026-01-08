@@ -1,0 +1,9 @@
+{
+  "name": "GramAI - Rural Empowerment",
+  "description": "An AI-powered virtual assistant for farmers providing weather updates, crop suggestions, market prices, and government scheme information in local languages.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
