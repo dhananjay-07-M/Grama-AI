@@ -83,11 +83,16 @@ const App: React.FC = () => {
   }, [profile, language]);
 
   useEffect(() => {
+    // Fall back to a default location (Bengaluru) so location-based features still work
+    const applyDefaultLocation = () => setLocation(prev => prev || { lat: 12.9716, lng: 77.5946 });
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-        (err) => console.error("Location error:", err)
+        (err) => { console.error("Location error:", err); applyDefaultLocation(); },
+        { timeout: 10000 }
       );
+    } else {
+      applyDefaultLocation();
     }
   }, []);
 

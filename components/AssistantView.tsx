@@ -6,7 +6,9 @@ import {
   ChevronDown, X, Globe, Sparkles, Delete, PlayCircle,
   MessageCircle, Send, Bot, RefreshCw
 } from 'lucide-react';
-import { getGeminiResponse, getGeminiSpeech } from '../services/geminiService';
+import { getGeminiResponse, getVoiceReply, speakText, stopSpeaking, getSpeechLocale } from '../services/geminiService';
+import { getWeather, describeWeather } from '../services/weatherService';
+import { MOCK_MARKET } from '../constants';
 import { Language, Message } from '../types';
 
 interface AssistantViewProps {
@@ -42,9 +44,21 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // --- REFS ---
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const currentAudioSource = useRef<AudioBufferSourceNode | null>(null);
   const recognitionRef = useRef<any>(null);
+  const speechIdRef = useRef(0);
+  // Refs mirror state so async speech callbacks always see the latest values
+  const ivrStepRef = useRef<IVRStep>('language-select');
+  const languageRef = useRef<Language>(initialLanguage);
+  const mutedRef = useRef(false);
+  const callActiveRef = useRef(true);
+  useEffect(() => { ivrStepRef.current = ivrStep; }, [ivrStep]);
+  useEffect(() => { languageRef.current = currentLanguage; }, [currentLanguage]);
+  useEffect(() => { mutedRef.current = isMuted; }, [isMuted]);
+  useEffect(() => () => {
+    callActiveRef.current = false;
+    stopSpeaking();
+    recognitionRef.current?.abort?.();
+  }, []);
 
   // --- INITIALIZATION (VOICE) ---
   useEffect(() => {
@@ -87,7 +101,9 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
 
   const startMainMenu = (lang: Language) => {
     setIvrStep('main-menu');
+    ivrStepRef.current = 'main-menu';
     setCurrentLanguage(lang);
+    languageRef.current = lang;
     setShowKeypad(true);
     setVisualContext(null);
     
@@ -113,15 +129,18 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
     } 
     else if (ivrStep === 'main-menu') {
       setIvrStep('service-active');
+      ivrStepRef.current = 'service-active';
       switch(key) {
         case '1': 
-          setVisualContext({ type: 'weather', title: 'Live Weather', data: '32°C, Partly Cloudy' });
-          handleAgentSpeak(currentLanguage === 'hi' ? "आपके क्षेत्र में तापमान 32 डिग्री है।" : "Current temperature is 32 degrees.");
+          speakWeather();
           break;
-        case '2': 
-          setVisualContext({ type: 'market', title: 'Mandi Rates', data: 'Wheat: ₹2150 | Rice: ₹2040' });
-          handleAgentSpeak(currentLanguage === 'hi' ? "गेहूं का भाव 2150 रुपये है।" : "Wheat is trading at 2150 rupees.");
+        case '2': {
+          const rates = MOCK_MARKET.slice(0, 3);
+          setVisualContext({ type: 'market', title: 'Mandi Rates', data: rates.map(r => `${r.commodity}: ₹${r.price}/${r.unit}`).join(' | ') });
+          const list = rates.map(r => `${r.commodity} ${r.price} per ${r.unit}`).join(', ');
+          handleAgentSpeak(currentLanguage === 'hi' ? `आज के मंडी भाव रुपये में: ${list}।` : `Today's mandi rates in rupees: ${list}. Ask me about any other crop.`);
           break;
+        }
         case '3': 
           setVisualContext({ type: 'doctor', title: 'Crop Doctor', data: 'Upload photo in app' });
           handleAgentSpeak(currentLanguage === 'hi' ? "कृपया फसल डॉक्टर सेक्शन में फोटो अपलोड करें।" : "Please upload a photo in Crop Doctor.");
@@ -139,71 +158,70 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
   };
 
   const stopAudio = () => {
-    if (currentAudioSource.current) {
-      currentAudioSource.current.stop();
-      currentAudioSource.current = null;
-    }
+    speechIdRef.current++;
+    stopSpeaking();
     setAgentStatus('idle');
   };
 
-  const playAudioData = async (base64: string) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-    }
-    try {
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const dataInt16 = new Int16Array(bytes.buffer);
-      const buffer = audioContextRef.current.createBuffer(1, dataInt16.length, 24000);
-      const channelData = buffer.getChannelData(0);
-      for (let i = 0; i < dataInt16.length; i++) channelData[i] = dataInt16[i] / 32768.0;
-
-      const source = audioContextRef.current.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioContextRef.current.destination);
-      
-      stopAudio(); 
-      currentAudioSource.current = source;
-      setAgentStatus('speaking');
-      source.start();
-      
-      source.onended = () => {
-        setAgentStatus('listening');
-        if (ivrStep === 'service-active') startListening();
-      };
-    } catch (e) {
-      console.error("Audio playback error", e);
-      setAgentStatus('listening');
-    }
+  const handleAgentSpeak = async (text: string) => {
+    const id = ++speechIdRef.current;
+    setCurrentText(text);
+    setAgentStatus('speaking');
+    await speakText(text, languageRef.current);
+    // Ignore if interrupted by a newer prompt or the call ended
+    if (id !== speechIdRef.current || !callActiveRef.current) return;
+    if (ivrStepRef.current === 'service-active') startListening();
+    else setAgentStatus('listening');
   };
 
-  const handleAgentSpeak = async (text: string) => {
-    setCurrentText(text);
+  const speakWeather = () => {
+    setVisualContext({ type: 'weather', title: 'Live Weather', data: 'Fetching...' });
     setAgentStatus('processing');
-    const audioData = await getGeminiSpeech(text);
-    if (audioData) playAudioData(audioData);
-    else setAgentStatus('listening'); 
+    if (!navigator.geolocation) {
+      handleAgentSpeak("Location is not available. Please open the Weather section in the app.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const w = await getWeather(pos.coords.latitude, pos.coords.longitude);
+          const desc = describeWeather(w.code);
+          setVisualContext({ type: 'weather', title: 'Live Weather', data: `${w.temperature}°C, ${desc}` });
+          handleAgentSpeak(languageRef.current === 'hi'
+            ? `आपके क्षेत्र में तापमान ${w.temperature} डिग्री है। नमी ${w.humidity} प्रतिशत है और बारिश की संभावना ${w.rainChance} प्रतिशत है।`
+            : `In your area it is ${w.temperature} degrees and ${desc.toLowerCase()}. Humidity is ${w.humidity} percent and the chance of rain is ${w.rainChance} percent.`);
+        } catch {
+          handleAgentSpeak("Sorry, I could not fetch the weather right now.");
+        }
+      },
+      () => handleAgentSpeak("Please allow location access to get local weather."),
+      { timeout: 10000 }
+    );
   };
 
   const processUserVoiceQuery = async (query: string) => {
     setAgentStatus('processing');
     try {
-      const response = await getGeminiResponse(query, [], currentLanguage);
-      await handleAgentSpeak(response || "Sorry, I didn't catch that.");
+      setCurrentText(`You: "${query}"`);
+      const response = await getVoiceReply(query, languageRef.current);
+      await handleAgentSpeak(response || "Sorry, I could not connect to the server. Please try again.");
     } catch (e) {
       handleAgentSpeak("Connection error. Please try later.");
     }
   };
 
   const startListening = () => {
-    if (isMuted) return;
+    if (mutedRef.current || !callActiveRef.current) { setAgentStatus('idle'); return; }
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-    if (recognitionRef.current) recognitionRef.current.stop();
+    if (!SpeechRecognition) {
+      setAgentStatus('idle');
+      setCurrentText("Voice input isn't supported in this browser. Please use Chat mode or try Google Chrome.");
+      return;
+    }
+    if (recognitionRef.current) recognitionRef.current.abort?.();
     
     const recognition = new SpeechRecognition();
-    recognition.lang = currentLanguage === 'en' ? 'en-US' : `${currentLanguage}-IN`;
+    recognition.lang = getSpeechLocale(languageRef.current);
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.onstart = () => setAgentStatus('listening');
@@ -212,13 +230,15 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
       processUserVoiceQuery(transcript);
     };
     recognition.onerror = () => setAgentStatus('idle');
+    recognition.onend = () => setAgentStatus(s => s === 'listening' ? 'idle' : s);
     recognitionRef.current = recognition;
     try { recognition.start(); } catch (e) { console.error("Mic error", e); }
   };
 
   const endCall = () => {
+    callActiveRef.current = false;
     stopAudio();
-    if (recognitionRef.current) recognitionRef.current.stop();
+    if (recognitionRef.current) recognitionRef.current.abort?.();
     setCallState('ended');
     setAgentStatus('idle');
     setTimeout(() => {
@@ -244,7 +264,9 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
 
     try {
       // Build history for context
-      const history = messages.map(m => ({
+      // Gemini history must start with a user turn, so skip the initial greeting
+      const firstUser = messages.findIndex(m => m.role === 'user');
+      const history = (firstUser === -1 ? [] : messages.slice(firstUser)).map(m => ({
         role: m.role,
         parts: [{ text: m.text }]
       }));
@@ -378,6 +400,20 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
                </p>
             </div>
 
+            {ivrStep === 'service-active' && (
+               <div className="w-full flex flex-col items-center gap-2 animate-in slide-in-from-bottom-4">
+                  <button
+                    onClick={() => { stopAudio(); startListening(); }}
+                    disabled={agentStatus === 'listening' || agentStatus === 'processing' || isMuted}
+                    className="flex items-center gap-2 px-6 py-3 rounded-full bg-emerald-500 text-white font-bold shadow-lg disabled:opacity-60 hover:bg-emerald-400 transition-colors"
+                  >
+                    {agentStatus === 'processing' ? <Loader2 size={18} className="animate-spin" /> : <Mic size={18} />}
+                    {agentStatus === 'listening' ? 'Listening...' : agentStatus === 'processing' ? 'Thinking...' : isMuted ? 'Unmute to speak' : 'Tap to speak'}
+                  </button>
+                  <button onClick={() => startMainMenu(currentLanguage)} className="text-xs text-slate-400 hover:text-white">Press * for Main Menu</button>
+               </div>
+            )}
+
             {ivrStep === 'language-select' && (
                <div className="w-full space-y-2 animate-in slide-in-from-bottom-4">
                   <p className="text-center text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-2">Select Language</p>
@@ -423,7 +459,13 @@ const AssistantView: React.FC<AssistantViewProps> = ({ language: initialLanguage
                 </div>
              ) : (
                <div className="px-8 flex justify-between items-center h-14">
-                  <button onClick={() => setIsMuted(!isMuted)} className={`p-3 rounded-full transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-slate-400'}`}>
+                  <button onClick={() => {
+                    const next = !isMuted;
+                    setIsMuted(next);
+                    mutedRef.current = next;
+                    if (next) recognitionRef.current?.abort?.();
+                    else if (agentStatus === 'idle' && ivrStep === 'service-active') startListening();
+                  }} className={`p-3 rounded-full transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-slate-400'}`}>
                      {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
                   </button>
                   <button onClick={endCall} className="w-16 h-16 -mt-8 bg-red-600 rounded-full flex items-center justify-center shadow-xl shadow-red-900/50 hover:bg-red-500 active:scale-95 transition-all border-4 border-slate-900">

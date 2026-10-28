@@ -1,7 +1,18 @@
 
-import React from 'react';
-import { Cloud, Sun, CloudRain, Wind, Droplets, Thermometer, MapPin, Smartphone, CloudSun } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Cloud, Sun, CloudRain, Wind, Droplets, Thermometer, MapPin, Smartphone, CloudSun, CloudLightning, CloudFog, Snowflake, Loader2, RefreshCw } from 'lucide-react';
 import { Language } from '../types';
+import { getWeather, describeWeather, weatherAdvice, WeatherData } from '../services/weatherService';
+
+const weatherIcon = (code: number, size = 24) => {
+  if (code === 0) return <Sun size={size} className="text-amber-500" />;
+  if (code <= 2) return <CloudSun size={size} className="text-amber-400" />;
+  if (code === 45 || code === 48) return <CloudFog size={size} className="text-slate-400" />;
+  if (code >= 95) return <CloudLightning size={size} className="text-purple-500" />;
+  if (code >= 71 && code <= 77) return <Snowflake size={size} className="text-sky-300" />;
+  if (code >= 51) return <CloudRain size={size} className="text-blue-400" />;
+  return <Cloud size={size} className="text-slate-400" />;
+};
 
 interface WeatherViewProps {
   location: { lat: number; lng: number } | null;
@@ -9,13 +20,27 @@ interface WeatherViewProps {
 }
 
 const WeatherView: React.FC<WeatherViewProps> = ({ location, language }) => {
-  const forecast = [
-    { day: 'Tue', temp: 32, icon: <Sun className="text-amber-500" /> },
-    { day: 'Wed', temp: 30, icon: <Cloud className="text-slate-400" /> },
-    { day: 'Thu', temp: 28, icon: <CloudRain className="text-blue-400" /> },
-    { day: 'Fri', temp: 29, icon: <CloudRain className="text-blue-400" /> },
-    { day: 'Sat', temp: 33, icon: <Sun className="text-amber-500" /> },
-  ];
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadWeather = async () => {
+    if (!location) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setWeather(await getWeather(location.lat, location.lng));
+    } catch (e) {
+      console.error(e);
+      setError('Could not load live weather. Please check your connection.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadWeather(); }, [location?.lat, location?.lng]);
+
+  const forecast = weather?.daily.slice(0, 7) || [];
 
   return (
     <div className="space-y-6 pb-10">
@@ -35,24 +60,27 @@ const WeatherView: React.FC<WeatherViewProps> = ({ location, language }) => {
           <div>
             <div className="flex items-center bg-white/20 px-3 py-1 rounded-full w-fit backdrop-blur-md text-xs font-bold mb-4 border border-white/20 shadow-sm">
               <MapPin size={14} className="mr-2" />
-              <span>{location ? `${location.lat.toFixed(2)}, ${location.lng.toFixed(2)}` : 'Detecting...'}</span>
+              <span>{weather?.placeName || (location ? `${location.lat.toFixed(2)}, ${location.lng.toFixed(2)}` : 'Detecting...')}</span>
             </div>
-            <h2 className="text-6xl font-bold mb-2 tracking-tighter">31°C</h2>
+            <h2 className="text-6xl font-bold mb-2 tracking-tighter">
+              {weather ? `${weather.temperature}°C` : loading || !location ? <Loader2 size={48} className="animate-spin" /> : '--'}
+            </h2>
             <p className="text-blue-100 font-medium text-xl flex items-center gap-2">
-                <Sun size={20} className="text-amber-400 animate-spin-slow" /> Partly Cloudy
+                {weather ? describeWeather(weather.code) : error || 'Fetching live weather...'}
             </p>
           </div>
-          <div className="bg-white/10 p-4 rounded-3xl backdrop-blur-md border border-white/20 shadow-lg">
-             <CloudSun size={64} className="text-amber-300 drop-shadow-lg" />
-          </div>
+          <button onClick={loadWeather} title="Refresh" className="bg-white/10 p-4 rounded-3xl backdrop-blur-md border border-white/20 shadow-lg hover:bg-white/20 transition-colors">
+             {weather ? weatherIcon(weather.code, 64) : <CloudSun size={64} className="text-amber-300 drop-shadow-lg" />}
+             <RefreshCw size={14} className={`mx-auto mt-2 ${loading ? 'animate-spin' : ''}`} />
+          </button>
         </div>
 
         <div className="relative z-10 grid grid-cols-2 md:grid-cols-4 gap-4 mt-8">
           {[
-            { label: 'Humidity', value: '64%', icon: <Droplets size={18} /> },
-            { label: 'Wind', value: '12 km/h', icon: <Wind size={18} /> },
-            { label: 'Pressure', value: '1012 hPa', icon: <Thermometer size={18} /> },
-            { label: 'Rain Chance', value: '20%', icon: <CloudRain size={18} /> },
+            { label: 'Humidity', value: weather ? `${weather.humidity}%` : '--', icon: <Droplets size={18} /> },
+            { label: 'Wind', value: weather ? `${weather.wind} km/h` : '--', icon: <Wind size={18} /> },
+            { label: 'Pressure', value: weather ? `${weather.pressure} hPa` : '--', icon: <Thermometer size={18} /> },
+            { label: 'Rain Chance', value: weather ? `${weather.rainChance}%` : '--', icon: <CloudRain size={18} /> },
           ].map((item, idx) => (
             <div key={idx} className="bg-black/20 p-4 rounded-2xl backdrop-blur-sm border border-white/10 hover:bg-black/30 transition-colors">
               <div className="flex items-center gap-2 mb-1 text-blue-100 opacity-80">
@@ -67,16 +95,20 @@ const WeatherView: React.FC<WeatherViewProps> = ({ location, language }) => {
 
       <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-slate-100">
         <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
-            <CloudSun className="text-blue-500" /> 5-Day Forecast
+            <CloudSun className="text-blue-500" /> 7-Day Forecast
         </h3>
         <div className="flex justify-between gap-4 overflow-x-auto pb-2 no-scrollbar">
+          {forecast.length === 0 && (
+            <p className="text-sm text-slate-400">{loading || !location ? 'Loading forecast...' : error || 'No forecast available.'}</p>
+          )}
           {forecast.map((f, i) => (
             <div key={i} className="flex flex-col items-center p-4 min-w-[100px] bg-slate-50 rounded-2xl border border-slate-100 hover:bg-blue-50 hover:border-blue-100 transition-all group cursor-pointer">
               <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 group-hover:text-blue-500">{f.day}</span>
               <div className="mb-4 transform group-hover:scale-125 transition-transform duration-300">
-                {f.icon}
+                {weatherIcon(f.code)}
               </div>
-              <span className="text-xl font-bold text-slate-800">{f.temp}°</span>
+              <span className="text-xl font-bold text-slate-800">{f.max}°</span>
+              <span className="text-xs font-medium text-slate-400">{f.min}° · {f.rainChance}% rain</span>
             </div>
           ))}
         </div>
@@ -107,11 +139,11 @@ const WeatherView: React.FC<WeatherViewProps> = ({ location, language }) => {
             <div className="flex-1">
                 <div className="bg-white/10 p-4 rounded-xl backdrop-blur-md border border-white/10 shadow-lg">
                     <div className="flex justify-between items-center mb-2">
-                        <p className="text-[10px] font-bold text-emerald-300 uppercase tracking-wider">RECEIVED 10:00 AM</p>
+                        <p className="text-[10px] font-bold text-emerald-300 uppercase tracking-wider">LATEST UPDATE</p>
                         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                     </div>
                     <p className="text-sm font-mono text-emerald-50 leading-relaxed">
-                        "GramAI Weather: Cloudy in your area. Temp 31C. Rain expected in 3 hrs. Cover harvested crops."
+                        {weather ? `"GramAI Weather: ${weatherAdvice(weather)}"` : '"GramAI Weather: fetching latest conditions..."'}
                     </p>
                 </div>
             </div>
